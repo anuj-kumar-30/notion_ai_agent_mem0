@@ -1,391 +1,97 @@
+import streamlit as st
 import os
 from groq import Groq
 from mem0 import MemoryClient
 import json
 from dotenv import load_dotenv
-import sys
 import traceback
+import sys
 
-# Import with error handling
-# checking it databases and pages are present in our notion integration
+# Import with error handling and better debugging
 try:
     from notion_databases import get_all_databases_content
     NOTION_DB_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠️  notion_databases module not available: {e}")
+    st.error(f"⚠️ notion_databases module not available: {e}")
     NOTION_DB_AVAILABLE = False
 
 try:
     from notion_pages import get_accessible_pages, get_page_content
     NOTION_PAGES_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠️  notion_pages module not available: {e}")
+    st.error(f"⚠️ notion_pages module not available: {e}")
     NOTION_PAGES_AVAILABLE = False
 
-# creating a chat bot for notion with groq
-class NotionGroqChatbot:
+# Load environment variables - handle deployment scenarios
+try:
+    load_dotenv()
+except Exception as e:
+    st.warning(f"Could not load .env file: {e}")
+
+class StreamlitNotionChatbot:
     def __init__(self, groq_api_key, mem0_api_key):
-        """
-        Initialize the Groq chatbot with Mem0 cloud memory and Notion integration
-        
-        Args:
-            groq_api_key (str): Your Groq API key
-            mem0_api_key (str): Your Mem0 API key for cloud storage
-        """
-        print(" Initializing chatbot components...")
-        
-        # Initialize Groq client
+        """Initialize the chatbot with API keys"""
         try:
             self.groq_client = Groq(api_key=groq_api_key)
-            print("✅ Groq client initialized")
-        except Exception as e:
-            print(f"❌ Error initializing Groq client: {e}")
-            raise
-        
-        # Initialize Mem0 cloud client
-        try:
-            print(" Initializing cloud memory system...")
             self.memory = MemoryClient(api_key=mem0_api_key)
-            print(" Cloud memory system initialized")
+            st.success("✅ Chatbot initialized successfully!")
         except Exception as e:
-            print(f" Error initializing cloud memory: {e}")
-            raise
-        
-        self.user_id = None  # Will be set after getting user name
-        self.notion_content = ""  # Will store loaded Notion content
-        self.notion_loaded = False
-        
-        print(" Chatbot initialization complete")
-        
-    def get_user_info(self):
-        """Get user name for personalized memory management"""
-        print(" Welcome to Notion AI Chatbot!")
-        print("=" * 50)
-        
-        while True:
-            try:
-                user_name = input("\n Please enter your name: ").strip()
-                if user_name:
-                    self.user_id = f"user_{user_name.lower().replace(' ', '_')}"
-                    print(f"\n Hello {user_name}! Your conversations will be saved under ID: {self.user_id}")
-                    break
-                else:
-                    print(" Please enter a valid name.")
-            except KeyboardInterrupt:
-                print("\n Goodbye!")
-                sys.exit(0)
-            except Exception as e:
-                print(f" Error getting user input: {e}")
-                return
-
-    def select_notion_content(self):
-        """Let user select which Notion databases and pages to load"""
-        if not NOTION_DB_AVAILABLE and not NOTION_PAGES_AVAILABLE:
-            print("  Notion modules not available. Skipping Notion content selection.")
-            return [], []
-            
-        print("\n Notion Content Selection")
-        print("=" * 50)
-        
-        selected_databases = []
-        selected_pages = []
-        
-        try:
-            # Ask about databases
-            if NOTION_DB_AVAILABLE:
-                load_databases = input("\n Do you want to load database content? (y/n): ").strip().lower()
-                if load_databases in ['y', 'yes']:
-                    selected_databases = ['all']  # For now, load all databases
-                    print(" Will load all accessible databases")
-            
-            # Get available pages
-            if NOTION_PAGES_AVAILABLE:
-                print("\n Checking available pages...")
-                try:
-                    pages = get_accessible_pages()
-                except Exception as e:
-                    print(f" Error getting pages: {e}")
-                    pages = []
-                
-                if pages:
-                    print(f"\n Found {len(pages)} accessible pages:")
-                    print("-" * 40)
-                    
-                    for i, page in enumerate(pages, 1):
-                        title = page.get('title', 'Untitled')
-                        print(f"{i:2d}. {title[:50]}")
-                    
-                    print("\n Page Selection Options:")
-                    print("  • Enter page numbers (e.g., 1,3,5 or 1-5)")
-                    print("  • Type 'all' to load all pages")
-                    print("  • Type 'none' to skip pages")
-                    print("  • Press Enter to skip pages")
-                    
-                    page_selection = input("\n Select pages to load: ").strip()
-                    
-                    if page_selection.lower() == 'all':
-                        selected_pages = pages
-                        print(f" Will load all {len(pages)} pages")
-                    elif page_selection.lower() in ['none', '']:
-                        selected_pages = []
-                        print("  Skipping pages")
-                    else:
-                        # Parse selection (e.g., "1,3,5" or "1-5")
-                        selected_pages = self.parse_page_selection(page_selection, pages)
-                        if selected_pages:
-                            print(f" Will load {len(selected_pages)} selected pages:")
-                            for page in selected_pages:
-                                print(f"   • {page.get('title', 'Untitled')}")
-                        else:
-                            print("  No valid pages selected")
-                else:
-                    print("  No accessible pages found")
-        
-        except KeyboardInterrupt:
-            print("\n⏭  Skipping Notion content selection...")
-            return [], []
-        except Exception as e:
-            print(f" Error during content selection: {e}")
-            print("  Will continue without Notion content...")
-            return [], []
-        
-        return selected_databases, selected_pages
-
-    def parse_page_selection(self, selection, pages):
-        """Parse user's page selection input"""
-        selected_pages = []
-        
-        try:
-            # Split by comma for multiple selections
-            parts = [part.strip() for part in selection.split(',')]
-            
-            for part in parts:
-                if '-' in part:
-                    # Handle range (e.g., "1-5")
-                    start, end = part.split('-', 1)
-                    start_idx = int(start.strip()) - 1
-                    end_idx = int(end.strip()) - 1
-                    
-                    if 0 <= start_idx < len(pages) and 0 <= end_idx < len(pages):
-                        for i in range(start_idx, min(end_idx + 1, len(pages))):
-                            if pages[i] not in selected_pages:
-                                selected_pages.append(pages[i])
-                else:
-                    # Handle single number
-                    page_num = int(part) - 1
-                    if 0 <= page_num < len(pages):
-                        if pages[page_num] not in selected_pages:
-                            selected_pages.append(pages[page_num])
-        
-        except (ValueError, IndexError) as e:
-            print(f"  Invalid selection format: {e}")
-            return []
-        
-        return selected_pages
-
-    def load_notion_content(self):
-        """Load selected content from Notion databases and pages"""
-        print("\n📚 Loading Notion content...")
-        
-        # Check if Notion modules are available
-        if not NOTION_DB_AVAILABLE and not NOTION_PAGES_AVAILABLE:
-            print("  Notion integration modules not available. Skipping Notion content loading.")
-            return
-        
-        # Let user select content first
-        try:
-            selected_databases, selected_pages = self.select_notion_content()
-        except Exception as e:
-            print(f" Error in content selection: {e}")
-            return
-        
-        if not selected_databases and not selected_pages:
-            print("  No Notion content selected. Continuing without Notion integration.")
-            return
-        
-        print("\n Processing selected content...")
-        print("=" * 50)
-        
-        try:
-            database_content = ""
-            page_content = ""
-            
-            # Load selected database content
-            if selected_databases and NOTION_DB_AVAILABLE:
-                print("🗃️  Loading selected databases...")
-                try:
-                    database_content = get_all_databases_content()
-                    if database_content:
-                        print(" Database content loaded successfully")
-                    else:
-                        print("  No database content found")
-                except Exception as e:
-                    print(f" Error loading databases: {e}")
-            
-            # Load selected page content
-            if selected_pages and NOTION_PAGES_AVAILABLE:
-                print(f" Loading {len(selected_pages)} selected pages...")
-                
-                for i, page in enumerate(selected_pages, 1):
-                    page_title = page.get('title', 'Untitled')
-                    print(f"   Processing page {i}/{len(selected_pages)}: {page_title}")
-                    
-                    try:
-                        content_data = get_page_content(page['id'])
-                        if content_data:
-                            page_content += f"\n{'='*80}\n"
-                            page_content += f"PAGE: {content_data['title']}\n"
-                            page_content += f"{'='*80}\n"
-                            page_content += content_data['content'] + "\n\n"
-                            print(f"Loaded successfully")
-                        else:
-                            print(f"No content found")
-                    except Exception as e:
-                        print(f"Error loading page: {e}")
-            
-            # Combine all selected content
-            self.notion_content = ""
-            if database_content:
-                self.notion_content += "NOTION DATABASES:\n" + "="*80 + "\n" + database_content + "\n\n"
-            if page_content:
-                self.notion_content += "NOTION PAGES:\n" + "="*80 + "\n" + page_content
-            
-            # Store Notion content in cloud memory
-            if self.notion_content:
-                try:
-                    messages = [{"role": "system", "content": f"Notion Knowledge Base Content:\n{self.notion_content}"}]
-                    self.memory.add(messages, user_id=self.user_id)
-                    print(f"\n Successfully loaded {len(self.notion_content)} characters from Notion to cloud memory")
-                    print(f"   - Databases: {'✅' if database_content else '❌'}")
-                    print(f"   - Pages: {'✅' if page_content else '❌'} ({len(selected_pages)} pages)")
-                    self.notion_loaded = True
-                    
-                    # Show summary of loaded content
-                    print(f"\n Content Summary:")
-                    if selected_databases:
-                        print(f"Databases: Loaded")
-                    if selected_pages:
-                        print(f"Pages loaded:")
-                        for page in selected_pages:
-                            print(f"      • {page.get('title', 'Untitled')}")
-                except Exception as e:
-                    print(f" Error storing content in cloud memory: {e}")
-            else:
-                print("  No content was loaded. Make sure pages/databases are shared with your integration.")
-                
-        except Exception as e:
-            print(f" Error loading Notion content: {e}")
-            print("  Continuing without Notion content...")
-
-    def show_loaded_content(self):
-        """Show what Notion content is currently loaded"""
-        if not self.notion_loaded or not self.notion_content:
-            print(" No Notion content is currently loaded.")
-            return
-        
-        print(f"\n Currently Loaded Notion Content:")
-        print("=" * 50)
-        
-        # Count databases and pages
-        db_count = 1 if "NOTION DATABASES:" in self.notion_content else 0
-        page_count = self.notion_content.count("PAGE: ") if "NOTION PAGES:" in self.notion_content else 0
-        
-        print(f" Summary:")
-        print(f"Databases: {db_count}")
-        print(f"Pages: {page_count}")
-        print(f"Total characters: {len(self.notion_content):,}")
-        
-        if page_count > 0:
-            print(f"\Loaded Pages:")
-            # Extract page titles
-            lines = self.notion_content.split('\n')
-            for line in lines:
-                if line.startswith("PAGE: "):
-                    page_title = line.replace("PAGE: ", "").strip()
-                    print(f"   • {page_title}")
+            st.error(f"❌ Error initializing chatbot: {e}")
+            st.stop()
     
-    def get_relevant_memories(self, query, limit=5):
-        """
-        Retrieve relevant memories from cloud memory based on the current query
-        """
+    def get_relevant_memories(self, query, user_id, limit=5):
+        """Retrieve relevant memories from cloud memory"""
         try:
-            memories = self.memory.search(query, user_id=self.user_id, version="v2", limit=limit)
+            memories = self.memory.search(query, user_id=user_id, version="v2", limit=limit)
             memory_texts = []
-            # Handle the list of memory dictionaries directly
             for memory in memories:
                 try:
-                    # Ensure memory is for the current user
-                    if memory.get("user_id") == self.user_id:
+                    if memory.get("user_id") == user_id:
                         memory_text = memory.get("memory", str(memory))
                         if memory_text:
                             memory_texts.append(memory_text)
-                except Exception as inner_e:
-                    print(f" Error processing memory: {inner_e}")
+                except Exception:
                     continue
-            if not memory_texts:
-                print(f"ℹ No relevant memories found for query: {query}")
             return memory_texts
         except Exception as e:
-            print(f" Error retrieving memories: {e}")
-            try:
-                # Log the API response for debugging
-                import requests
-                response = requests.post(
-                    "https://api.mem0.ai/v1/memories/search",
-                    headers={"Authorization": f"Bearer {os.getenv('MEM0_API_KEY')}"},
-                    json={"query": query, "user_id": self.user_id, "version": "v2", "limit": limit}
-                )
-                print(f"DEBUG: API response: {response.text}")
-            except Exception as debug_e:
-                print(f" Error debugging API response: {debug_e}")
+            st.error(f"❌ Error retrieving memories: {e}")
             return []
     
-    def add_to_memory(self, message, response):
-        """
-        Add the conversation to cloud memory
-        """
+    def add_to_memory(self, message, response, user_id):
+        """Add conversation to cloud memory"""
         try:
-            # Format conversation as a list of message dictionaries
             conversation = [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": response}
             ]
-            self.memory.add(conversation, user_id=self.user_id)
-            print(f" Added conversation to cloud memory for user: {self.user_id}")
+            self.memory.add(conversation, user_id=user_id)
         except Exception as e:
-            print(f" Error adding to cloud memory: {e}")
+            st.error(f"❌ Error adding to memory: {e}")
     
-    def generate_response(self, user_message, model="llama3-8b-8192"):
-        """
-        Generate a response using Groq with context from cloud memory and Notion content
-        """
+    def generate_response(self, user_message, user_id, notion_content="", model="llama3-8b-8192"):
+        """Generate response using Groq with context"""
         try:
-            # Get relevant memories (excluding the Notion knowledge base)
-            relevant_memories = self.get_relevant_memories(user_message)
+            # Get relevant memories
+            relevant_memories = self.get_relevant_memories(user_message, user_id)
             
-            # Filter out the large Notion knowledge base from memories for context
+            # Filter out large Notion knowledge base from memories
             filtered_memories = []
             for mem in relevant_memories:
                 if isinstance(mem, str) and not mem.startswith("Notion Knowledge Base Content:"):
                     filtered_memories.append(mem)
-                elif not isinstance(mem, str):
-                    mem_str = str(mem)
-                    if not mem_str.startswith("Notion Knowledge Base Content:"):
-                        filtered_memories.append(mem_str)
             
-            # Build context from memories
+            # Build context
             context = ""
             if filtered_memories:
                 context = "Previous conversation context:\n" + "\n".join(filtered_memories[:3]) + "\n\n"
             
-            # Add Notion content context if available
+            # Add Notion context
             notion_context = ""
-            if self.notion_loaded and self.notion_content:
-                # Use a smaller subset of Notion content to avoid token limits
-                notion_preview = self.notion_content[:3000] + "..." if len(self.notion_content) > 3000 else self.notion_content
+            if notion_content:
+                notion_preview = notion_content[:3000] + "..." if len(notion_content) > 3000 else notion_content
                 notion_context = f"Notion Knowledge Base (use this to answer questions about the user's Notion content):\n{notion_preview}\n\n"
             
-            # Create the system prompt
+            # Create system prompt
             system_prompt = f"""You are a helpful AI assistant with access to the user's Notion workspace content. Use the following information to provide relevant and personalized responses.
 
 {notion_context}{context}Instructions:
@@ -397,7 +103,7 @@ class NotionGroqChatbot:
 
 Current conversation:"""
             
-            # Generate response using Groq
+            # Generate response
             chat_completion = self.groq_client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -410,179 +116,421 @@ Current conversation:"""
             
             response = chat_completion.choices[0].message.content
             
-            # Add this conversation to cloud memory
-            self.add_to_memory(user_message, response)
+            # Add to memory
+            self.add_to_memory(user_message, response, user_id)
             
             return response
             
         except Exception as e:
-            return f" Error generating response: {e}"
+            return f"❌ Error generating response: {e}"
     
-    def show_memories(self):
-        """Show user's conversation memories from cloud storage"""
+    def get_all_memories(self, user_id):
+        """Get all memories for a user"""
         try:
-            # Get all memories for the user from cloud
-            memories = self.memory.get_all(user_id=self.user_id, version="v2")
-            print(f"DEBUG: Raw memories (count: {len(memories)}): {memories}")  # Debug print
-            
-            if memories and len(memories) > 0:
-                print(f"\n Your conversation memories ({len(memories)} total):")
-                print("-" * 60)
-                
-                displayed_count = 0
-                # Filter memories by user_id and reverse to show most recent first
-                user_memories = [m for m in memories if m.get("user_id") == self.user_id]
-                recent_memories = list(reversed(user_memories))[:10]
-                
-                for i, memory in enumerate(recent_memories, 1):
-                    try:
-                        memory_text = memory.get("memory", str(memory))
-                        # Skip the large Notion knowledge base content
-                        if memory_text and not memory_text.startswith("Notion Knowledge Base Content:"):
-                            displayed_count += 1
-                            preview = memory_text[:150] + "..." if len(memory_text) > 150 else memory_text
-                            print(f"{displayed_count}. {preview}")
-                            
-                            if displayed_count >= 5:  # Limit to 5 displayed memories
-                                break
-                        
-                    except Exception as inner_e:
-                        print(f" Error processing memory {i}: {inner_e}")
-                        continue
-                
-                if displayed_count == 0:
-                    print("No conversation memories found for your user ID.")
-                
-                print("-" * 60)
-            else:
-                print("\n No memories found for your user ID in cloud storage.")
-            
+            memories = self.memory.get_all(user_id=user_id, version="v2")
+            user_memories = [m for m in memories if m.get("user_id") == user_id]
+            return user_memories
         except Exception as e:
-            print(f" Error retrieving memories: {e}")
-            print(" This might be due to a network issue or invalid API key. Check your MEM0_API_KEY and try again.")
-
-    def clear_memory(self):
-        """
-        Clear all memories for the current user from cloud storage
-        """
+            st.error(f"❌ Error retrieving memories: {e}")
+            return []
+    
+    def clear_memory(self, user_id):
+        """Clear all memories for a user"""
         try:
-            self.memory.delete_all(user_id=self.user_id)
-            print("  Cloud memory cleared successfully!")
-            # Reload Notion content after clearing
-            if NOTION_DB_AVAILABLE or NOTION_PAGES_AVAILABLE:
-                self.load_notion_content()
+            self.memory.delete_all(user_id=user_id)
+            return True
         except Exception as e:
-            print(f" Error clearing cloud memory: {e}")
-            print(" Check your MEM0_API_KEY and network connection.")
+            st.error(f"❌ Error clearing memory: {e}")
+            return False
 
-    def chat(self):
-        """
-        Start an interactive chat session
-        """
-        try:
-            # Get user information
-            self.get_user_info()
-            
-            # Load Notion content with selection
-            self.load_notion_content()
-            
-            print(f"\n Notion AI Chatbot ready! (User: {self.user_id})")
-            print(" I can answer questions about your loaded Notion content and remember our conversations in the cloud")
-            print(" Available commands:")
-            print("   • 'quit' - Exit the chatbot")
-            print("   • 'memory' - Show conversation memories")
-            print("   • 'clear' - Clear all memories")
-            print("   • 'reload' - Reload Notion content")
-            print("   • 'content' - Show currently loaded content")
-            print("=" * 80)
-            
-            while True:
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_notion_pages_cached(notion_token):
+    """Get Notion pages with caching to avoid repeated API calls"""
+    try:
+        # Temporarily set the token
+        original_token = os.environ.get("NOTION_TOKEN")
+        os.environ["NOTION_TOKEN"] = notion_token
+        
+        # Import here to use the updated token
+        import importlib
+        if 'notion_pages' in sys.modules:
+            importlib.reload(sys.modules['notion_pages'])
+        
+        from notion_pages import get_accessible_pages
+        pages = get_accessible_pages()
+        
+        # Restore original token
+        if original_token:
+            os.environ["NOTION_TOKEN"] = original_token
+        elif "NOTION_TOKEN" in os.environ:
+            del os.environ["NOTION_TOKEN"]
+        
+        return pages, None
+    
+    except Exception as e:
+        error_msg = f"Error fetching pages: {str(e)}"
+        st.error(error_msg)
+        return [], error_msg
+
+def load_notion_content(selected_databases, selected_pages, notion_token):
+    """Load content from selected Notion databases and pages"""
+    content = ""
+    
+    try:
+        # Set the notion token temporarily
+        original_token = os.environ.get("NOTION_TOKEN")
+        os.environ["NOTION_TOKEN"] = notion_token
+        
+        # Load database content
+        if selected_databases and NOTION_DB_AVAILABLE:
+            with st.spinner("🗃️ Loading database content..."):
                 try:
-                    user_input = input(f"\n{self.user_id.replace('user_', '').title()}: ").strip()
-                    
-                    if user_input.lower() in ['quit', 'exit', 'bye']:
-                        print("👋 Goodbye! Your memories have been saved in the cloud.")
-                        break
-                    
-                    if user_input.lower() == 'memory':
-                        self.show_memories()
-                        continue
-                        
-                    if user_input.lower() == 'clear':
-                        self.clear_memory()
-                        continue
-                        
-                    if user_input.lower() == 'reload':
-                        self.load_notion_content()
-                        continue
-                        
-                    if user_input.lower() == 'content':
-                        self.show_loaded_content()
-                        continue
-                    
-                    if not user_input:
-                        continue
-                        
-                    print(" Assistant: ", end="", flush=True)
-                    response = self.generate_response(user_input)
-                    print(response)
-                    
-                except KeyboardInterrupt:
-                    print("\n Goodbye!")
-                    break
+                    database_content = get_all_databases_content()
+                    if database_content:
+                        content += "NOTION DATABASES:\n" + "="*80 + "\n" + database_content + "\n\n"
+                        st.success("✅ Database content loaded")
+                    else:
+                        st.warning("⚠️ No database content found")
                 except Exception as e:
-                    print(f"\n Error in chat loop: {e}")
-                    continue
-                    
-        except Exception as e:
-            print(f" Error in chat session: {e}")
-            traceback.print_exc()
-
+                    st.error(f"❌ Error loading databases: {e}")
+        
+        # Load page content
+        if selected_pages and NOTION_PAGES_AVAILABLE:
+            with st.spinner(f"📄 Loading {len(selected_pages)} pages..."):
+                page_content = ""
+                success_count = 0
+                
+                for i, page in enumerate(selected_pages):
+                    try:
+                        st.write(f"Loading page {i+1}/{len(selected_pages)}: {page.get('title', 'Unknown')}")
+                        content_data = get_page_content(page['id'])
+                        if content_data:
+                            page_content += f"\n{'='*80}\n"
+                            page_content += f"PAGE: {content_data['title']}\n"
+                            page_content += f"{'='*80}\n"
+                            page_content += content_data['content'] + "\n\n"
+                            success_count += 1
+                        else:
+                            st.warning(f"⚠️ No content found for page: {page.get('title', 'Unknown')}")
+                    except Exception as e:
+                        st.error(f"❌ Error loading page {page.get('title', 'Unknown')}: {e}")
+                
+                if page_content:
+                    content += "NOTION PAGES:\n" + "="*80 + "\n" + page_content
+                    st.success(f"✅ Successfully loaded {success_count}/{len(selected_pages)} pages")
+                else:
+                    st.warning("⚠️ No page content was loaded")
+        
+        # Restore original token
+        if original_token:
+            os.environ["NOTION_TOKEN"] = original_token
+        elif "NOTION_TOKEN" in os.environ:
+            del os.environ["NOTION_TOKEN"]
+    
+    except Exception as e:
+        st.error(f"❌ Error loading Notion content: {e}")
+        st.write("**Debug info:**")
+        st.write(f"- Selected databases: {len(selected_databases) if selected_databases else 0}")
+        st.write(f"- Selected pages: {len(selected_pages) if selected_pages else 0}")
+        st.write(f"- NOTION_DB_AVAILABLE: {NOTION_DB_AVAILABLE}")
+        st.write(f"- NOTION_PAGES_AVAILABLE: {NOTION_PAGES_AVAILABLE}")
+        st.write(f"- Error: {str(e)}")
+    
+    return content
 
 def main():
-    print("🔧 Starting Notion Groq Chatbot...")
+    st.set_page_config(
+        page_title="Notion AI Chatbot",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     
-    try:
-        load_dotenv()
-        print(" Environment variables loaded")
-    except Exception as e:
-        print(f"  Could not load .env file: {e}")
+    st.title("🤖 Notion AI Chatbot")
+    st.markdown("*Chat with your Notion content using AI with persistent memory*")
     
-    # Configuration
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    MEM0_API_KEY = os.getenv("MEM0_API_KEY")
+    # Debug section (can be removed in production)
+    with st.expander("🔧 Debug Info", expanded=False):
+        st.write("**Environment Status:**")
+        st.write(f"- Python version: {sys.version}")
+        st.write(f"- NOTION_DB_AVAILABLE: {NOTION_DB_AVAILABLE}")
+        st.write(f"- NOTION_PAGES_AVAILABLE: {NOTION_PAGES_AVAILABLE}")
+        st.write(f"- Current working directory: {os.getcwd()}")
+        st.write(f"- Available environment variables: {[k for k in os.environ.keys() if 'API' in k or 'TOKEN' in k]}")
     
-    if not GROQ_API_KEY:
-        print(" Please set your GROQ_API_KEY environment variable")
-        print(" You can get your API key from: https://console.groq.com/keys")
-        print(" Add it to your .env file: GROQ_API_KEY=your_key_here")
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Get API keys from environment or user input
+        groq_api_key = st.text_input(
+            "🔑 Groq API Key", 
+            value=os.getenv("GROQ_API_KEY", ""), 
+            type="password",
+            help="Get your API key from https://console.groq.com/keys"
+        )
+        
+        mem0_api_key = st.text_input(
+            "🧠 Mem0 API Key", 
+            value=os.getenv("MEM0_API_KEY", ""), 
+            type="password",
+            help="Get your API key from https://app.mem0.ai/"
+        )
+        
+        notion_token = st.text_input(
+            "📝 Notion Token", 
+            value=os.getenv("NOTION_TOKEN", ""), 
+            type="password",
+            help="Your Notion integration token"
+        )
+        
+        st.divider()
+        
+        # User ID
+        user_name = st.text_input("👤 Your Name", value="", help="Used for personalized memory management")
+        
+        if user_name:
+            user_id = f"user_{user_name.lower().replace(' ', '_')}"
+            st.success(f"✅ User ID: {user_id}")
+        else:
+            user_id = None
+            st.warning("⚠️ Please enter your name to enable memory features")
+        
+        # Model selection
+        model = st.selectbox("🧠 AI Model", 
+                           ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768"],
+                           help="Choose the AI model for responses")
+        
+        st.divider()
+        
+        # Notion Content Selection
+        st.header("📚 Notion Content")
+        
+        notion_content = ""
+        selected_databases = []
+        selected_pages = []
+        
+        if notion_token:
+            # Test connection button
+            if st.button("🧪 Test Notion Connection"):
+                with st.spinner("Testing connection..."):
+                    try:
+                        pages, error = get_notion_pages_cached(notion_token)
+                        if error:
+                            st.error(f"❌ Connection failed: {error}")
+                        else:
+                            st.success(f"✅ Connection successful! Found {len(pages)} pages")
+                    except Exception as e:
+                        st.error(f"❌ Connection test failed: {e}")
+            
+            # Database selection
+            if NOTION_DB_AVAILABLE:
+                load_databases = st.checkbox("📊 Load Database Content", help="Load all accessible databases")
+                if load_databases:
+                    selected_databases = ['all']
+            
+            # Page selection with better error handling
+            try:
+                with st.spinner("🔍 Fetching accessible pages..."):
+                    pages, error = get_notion_pages_cached(notion_token)
+                
+                if error:
+                    st.error(f"❌ Failed to fetch pages: {error}")
+                    st.write("**Troubleshooting tips:**")
+                    st.write("1. Check if your Notion token is correct")
+                    st.write("2. Ensure your integration has access to the pages")
+                    st.write("3. Try refreshing the page")
+                elif pages:
+                    st.success(f"✅ Found {len(pages)} accessible pages")
+                    
+                    # Page selection options
+                    page_selection_mode = st.radio("📄 Page Selection", 
+                                                 ["None", "Select Specific Pages", "All Pages"])
+                    
+                    if page_selection_mode == "Select Specific Pages":
+                        st.write("**Available Pages:**")
+                        selected_page_indices = []
+                        for i, page in enumerate(pages):
+                            page_title = page.get('title', 'Untitled')[:50]
+                            if st.checkbox(f"📄 {page_title}", key=f"page_{i}"):
+                                selected_page_indices.append(i)
+                        
+                        selected_pages = [pages[i] for i in selected_page_indices]
+                        
+                        if selected_pages:
+                            st.info(f"Selected {len(selected_pages)} pages")
+                    
+                    elif page_selection_mode == "All Pages":
+                        selected_pages = pages
+                        st.info(f"📄 All {len(pages)} pages will be loaded")
+                else:
+                    st.warning("⚠️ No accessible pages found. Make sure to share pages with your Notion integration.")
+            
+            except Exception as e:
+                st.error(f"❌ Error accessing Notion: {e}")
+                st.write("**Full error details:**")
+                st.code(str(e))
+        
+        elif not notion_token:
+            st.warning("⚠️ Enter Notion token to load content")
+        
+        # Load content button
+        load_button_disabled = not (selected_databases or selected_pages) or not notion_token
+        
+        if st.button("🔄 Load Notion Content", disabled=load_button_disabled):
+            if notion_token and (selected_databases or selected_pages):
+                notion_content = load_notion_content(selected_databases, selected_pages, notion_token)
+                if notion_content:
+                    st.session_state['notion_content'] = notion_content
+                    st.success("✅ Notion content loaded successfully!")
+                    
+                    # Show content summary
+                    db_count = 1 if "NOTION DATABASES:" in notion_content else 0
+                    page_count = notion_content.count("PAGE: ") if "NOTION PAGES:" in notion_content else 0
+                    
+                    st.info(f"📊 Loaded: {db_count} databases, {page_count} pages ({len(notion_content):,} characters)")
+                else:
+                    st.warning("⚠️ No content was loaded. Check the debug info above.")
+            else:
+                st.error("❌ Please provide Notion token and select content to load")
+        
+        st.divider()
+        
+        # Memory & Utils section
+        st.header("🧠 Memory & Utils")
+        
+        if groq_api_key and mem0_api_key and user_id:
+            # Initialize chatbot if not already done
+            if 'chatbot' not in st.session_state:
+                try:
+                    st.session_state['chatbot'] = StreamlitNotionChatbot(groq_api_key, mem0_api_key)
+                except Exception as e:
+                    st.error(f"❌ Failed to initialize chatbot: {e}")
+            
+            # Show memories
+            if st.button("📋 Show Memories"):
+                with st.spinner("Fetching memories..."):
+                    memories = st.session_state['chatbot'].get_all_memories(user_id)
+                    
+                    if memories:
+                        st.write(f"**Found {len(memories)} memories:**")
+                        
+                        # Filter and display recent memories
+                        displayed_count = 0
+                        for i, memory in enumerate(reversed(memories)):
+                            try:
+                                memory_text = memory.get("memory", str(memory))
+                                if memory_text and not memory_text.startswith("Notion Knowledge Base Content:"):
+                                    displayed_count += 1
+                                    
+                                    # Create expandable section for each memory
+                                    with st.expander(f"Memory {displayed_count} (Recent)", expanded=False):
+                                        st.text_area(
+                                            label="Content", 
+                                            value=memory_text, 
+                                            height=150, 
+                                            disabled=True,
+                                            key=f"memory_{i}_{displayed_count}"
+                                        )
+                                    
+                                    if displayed_count >= 10:
+                                        break
+                            except Exception:
+                                continue
+                        
+                        if displayed_count == 0:
+                            st.info("No conversation memories found.")
+                    else:
+                        st.info("No memories found.")
+            
+            # Clear memories
+            if st.button("🗑️ Clear Memories", type="secondary"):
+                with st.spinner("Clearing memories..."):
+                    if st.session_state['chatbot'].clear_memory(user_id):
+                        st.success("✅ Memories cleared successfully!")
+                        # Reload notion content to memory if available
+                        if 'notion_content' in st.session_state:
+                            notion_content = st.session_state['notion_content']
+                            if notion_content:
+                                try:
+                                    messages = [{"role": "system", "content": f"Notion Knowledge Base Content:\n{notion_content}"}]
+                                    st.session_state['chatbot'].memory.add(messages, user_id=user_id)
+                                    st.info("🔄 Notion content reloaded to memory")
+                                except Exception as e:
+                                    st.error(f"Error reloading Notion content: {e}")
+            
+            # Clear chat
+            if st.button("🔄 Clear Chat", type="secondary"):
+                st.session_state.messages = []
+                st.rerun()
+        
+        # Show loaded content summary
+        if 'notion_content' in st.session_state and st.session_state['notion_content']:
+            st.divider()
+            st.subheader("📚 Loaded Content")
+            
+            content = st.session_state['notion_content']
+            db_count = 1 if "NOTION DATABASES:" in content else 0
+            page_count = content.count("PAGE: ") if "NOTION PAGES:" in content else 0
+            
+            st.metric("🗃️ Databases", db_count)
+            st.metric("📄 Pages", page_count)
+            st.metric("📝 Characters", f"{len(content):,}")
+            
+            # Show page titles
+            if page_count > 0:
+                with st.expander("📄 Loaded Pages"):
+                    lines = content.split('\n')
+                    for line in lines:
+                        if line.startswith("PAGE: "):
+                            page_title = line.replace("PAGE: ", "").strip()
+                            st.write(f"• {page_title}")
+    
+    # Main chat interface
+    if not groq_api_key or not mem0_api_key:
+        st.warning("⚠️ Please provide both Groq and Mem0 API keys in the sidebar to start chatting.")
         return
     
-    if not MEM0_API_KEY:
-        print(" Please set your MEM0_API_KEY environment variable")
-        print(" Sign up at https://app.mem0.ai/ to get your API key")
-        print(" Add it to your .env file: MEM0_API_KEY=your_key_here")
+    if not user_id:
+        st.warning("⚠️ Please enter your name in the sidebar to enable memory features.")
         return
     
-    # Check if Notion token is set
-    NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-    if not NOTION_TOKEN:
-        print("  NOTION_TOKEN not found. Notion integration will be limited.")
-        print(" Set NOTION_TOKEN in your .env file to enable full Notion features.")
-        # Initialize and start the chatbot
-    try:
-        print(" Initializing chatbot...")
-        chatbot = NotionGroqChatbot(GROQ_API_KEY, MEM0_API_KEY)
-        chatbot.chat()
-    except KeyboardInterrupt:
-        print("\n Goodbye!")
-    except Exception as e:
-        print(f" Error initializing chatbot: {e}")
-        print("\n Full error details:")
-        traceback.print_exc()
-        print("\n Make sure you have installed the required packages:")
-        print("pip install groq mem0ai notion-client python-dotenv")
-
+    # Initialize chatbot
+    if 'chatbot' not in st.session_state:
+        try:
+            with st.spinner("Initializing chatbot..."):
+                st.session_state['chatbot'] = StreamlitNotionChatbot(groq_api_key, mem0_api_key)
+        except Exception as e:
+            st.error(f"❌ Failed to initialize chatbot: {e}")
+            return
+    
+    # Chat interface header
+    st.header("💬 Chat")
+    
+    # Chat input
+    if prompt := st.chat_input("Ask me anything about your Notion content..."):
+        # Initialize chat history if not exists
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Generate response
+        with st.spinner("🤔 Thinking..."):
+            notion_content = st.session_state.get('notion_content', '')
+            response = st.session_state['chatbot'].generate_response(
+                prompt, user_id, notion_content, model
+            )
+        
+        # Add assistant response to chat history
+        st.session_state.messages.append({"role": "assistant", "content": response})
+    
+    # Display chat messages
+    if 'messages' in st.session_state:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
 if __name__ == "__main__":
     main()
