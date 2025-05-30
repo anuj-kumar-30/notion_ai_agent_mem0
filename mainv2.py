@@ -143,59 +143,162 @@ Current conversation:"""
             st.error(f"❌ Error clearing memory: {e}")
             return False
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_notion_pages_cached(notion_token):
-    """Get Notion pages with caching to avoid repeated API calls"""
+def get_notion_pages_simple(notion_token):
+    """Simple function to get Notion pages without complex caching"""
     try:
-        # Temporarily set the token
-        original_token = os.environ.get("NOTION_TOKEN")
-        os.environ["NOTION_TOKEN"] = notion_token
+        # Import notion client directly
+        from notion_client import Client
         
-        # Import here to use the updated token
-        import importlib
-        if 'notion_pages' in sys.modules:
-            importlib.reload(sys.modules['notion_pages'])
+        # Create client with the provided token
+        client = Client(auth=notion_token)
         
-        from notion_pages import get_accessible_pages
-        pages = get_accessible_pages()
+        # Search for pages
+        response = client.search(
+            query="",
+            page_size=100,
+            filter={
+                "property": "object",
+                "value": "page"
+            }
+        )
         
-        # Restore original token
-        if original_token:
-            os.environ["NOTION_TOKEN"] = original_token
-        elif "NOTION_TOKEN" in os.environ:
-            del os.environ["NOTION_TOKEN"]
+        pages = []
+        for result in response.get('results', []):
+            if result.get('object') == 'page':
+                # Extract title
+                title = "Untitled"
+                if result.get('properties'):
+                    title_prop = result['properties'].get('title') or result['properties'].get('Name')
+                    if title_prop and title_prop.get('title') and len(title_prop['title']) > 0:
+                        title = title_prop['title'][0]['plain_text']
+                    elif title_prop and title_prop.get('rich_text') and len(title_prop['rich_text']) > 0:
+                        title = title_prop['rich_text'][0]['plain_text']
+                
+                pages.append({
+                    'id': result['id'],
+                    'title': title,
+                    'url': result.get('url', ''),
+                    'created_time': result.get('created_time', ''),
+                    'last_edited_time': result.get('last_edited_time', ''),
+                })
         
         return pages, None
     
     except Exception as e:
         error_msg = f"Error fetching pages: {str(e)}"
-        st.error(error_msg)
         return [], error_msg
+
+def get_page_content_simple(page_id, notion_token):
+    """Simple function to get page content"""
+    try:
+        from notion_client import Client
+        
+        client = Client(auth=notion_token)
+        
+        # Get page metadata
+        page = client.pages.retrieve(page_id)
+        
+        # Extract title
+        title = "Untitled"
+        if page.get('properties'):
+            title_prop = page['properties'].get('title') or page['properties'].get('Name')
+            if title_prop and title_prop.get('title') and len(title_prop['title']) > 0:
+                title = title_prop['title'][0]['plain_text']
+            elif title_prop and title_prop.get('rich_text') and len(title_prop['rich_text']) > 0:
+                title = title_prop['rich_text'][0]['plain_text']
+        
+        # Get page blocks (content)
+        blocks_response = client.blocks.children.list(block_id=page_id, page_size=100)
+        
+        content = f"# {title}\n\n"
+        
+        # Process each block
+        for block in blocks_response.get('results', []):
+            block_text = ""
+            block_type = block.get('type', '')
+            block_data = block.get(block_type, {})
+            
+            # Handle different block types
+            if 'rich_text' in block_data:
+                for text_obj in block_data['rich_text']:
+                    block_text += text_obj.get('plain_text', '')
+            
+            # Format based on block type
+            if block_type == 'heading_1':
+                block_text = f"\n# {block_text}\n"
+            elif block_type == 'heading_2':
+                block_text = f"\n## {block_text}\n"
+            elif block_type == 'heading_3':
+                block_text = f"\n### {block_text}\n"
+            elif block_type == 'paragraph':
+                block_text = f"{block_text}\n"
+            elif block_type == 'bulleted_list_item':
+                block_text = f"• {block_text}\n"
+            elif block_type == 'numbered_list_item':
+                block_text = f"1. {block_text}\n"
+            elif block_type == 'to_do':
+                checkbox = "☑" if block_data.get('checked') else "☐"
+                block_text = f"{checkbox} {block_text}\n"
+            elif block_type == 'quote':
+                block_text = f"> {block_text}\n"
+            elif block_type == 'code':
+                language = block_data.get('language', '')
+                block_text = f"```{language}\n{block_text}\n```\n"
+            elif block_type == 'divider':
+                block_text = "\n---\n"
+            
+            content += block_text
+        
+        # Clean up content
+        import re
+        content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+        content = content.strip()
+        
+        return {
+            'title': title,
+            'content': content,
+            'word_count': len(content.split()),
+            'char_count': len(content),
+            'page_id': page_id,
+            'url': page.get('url', ''),
+            'last_edited': page.get('last_edited_time', '')
+        }
+        
+    except Exception as e:
+        st.error(f"Error extracting page content: {str(e)}")
+        return None
 
 def load_notion_content(selected_databases, selected_pages, notion_token):
     """Load content from selected Notion databases and pages"""
     content = ""
     
     try:
-        # Set the notion token temporarily
-        original_token = os.environ.get("NOTION_TOKEN")
-        os.environ["NOTION_TOKEN"] = notion_token
-        
         # Load database content
         if selected_databases and NOTION_DB_AVAILABLE:
             with st.spinner("🗃️ Loading database content..."):
                 try:
+                    # Temporarily set the token
+                    original_token = os.environ.get("NOTION_TOKEN")
+                    os.environ["NOTION_TOKEN"] = notion_token
+                    
                     database_content = get_all_databases_content()
                     if database_content:
                         content += "NOTION DATABASES:\n" + "="*80 + "\n" + database_content + "\n\n"
                         st.success("✅ Database content loaded")
                     else:
                         st.warning("⚠️ No database content found")
+                    
+                    # Restore original token
+                    if original_token:
+                        os.environ["NOTION_TOKEN"] = original_token
+                    elif "NOTION_TOKEN" in os.environ:
+                        del os.environ["NOTION_TOKEN"]
+                        
                 except Exception as e:
                     st.error(f"❌ Error loading databases: {e}")
         
         # Load page content
-        if selected_pages and NOTION_PAGES_AVAILABLE:
+        if selected_pages:
             with st.spinner(f"📄 Loading {len(selected_pages)} pages..."):
                 page_content = ""
                 success_count = 0
@@ -203,7 +306,7 @@ def load_notion_content(selected_databases, selected_pages, notion_token):
                 for i, page in enumerate(selected_pages):
                     try:
                         st.write(f"Loading page {i+1}/{len(selected_pages)}: {page.get('title', 'Unknown')}")
-                        content_data = get_page_content(page['id'])
+                        content_data = get_page_content_simple(page['id'], notion_token)
                         if content_data:
                             page_content += f"\n{'='*80}\n"
                             page_content += f"PAGE: {content_data['title']}\n"
@@ -220,12 +323,6 @@ def load_notion_content(selected_databases, selected_pages, notion_token):
                     st.success(f"✅ Successfully loaded {success_count}/{len(selected_pages)} pages")
                 else:
                     st.warning("⚠️ No page content was loaded")
-        
-        # Restore original token
-        if original_token:
-            os.environ["NOTION_TOKEN"] = original_token
-        elif "NOTION_TOKEN" in os.environ:
-            del os.environ["NOTION_TOKEN"]
     
     except Exception as e:
         st.error(f"❌ Error loading Notion content: {e}")
@@ -315,7 +412,7 @@ def main():
             if st.button("🧪 Test Notion Connection"):
                 with st.spinner("Testing connection..."):
                     try:
-                        pages, error = get_notion_pages_cached(notion_token)
+                        pages, error = get_notion_pages_simple(notion_token)
                         if error:
                             st.error(f"❌ Connection failed: {error}")
                         else:
@@ -330,46 +427,70 @@ def main():
                     selected_databases = ['all']
             
             # Page selection with better error handling
-            try:
-                with st.spinner("🔍 Fetching accessible pages..."):
-                    pages, error = get_notion_pages_cached(notion_token)
-                
-                if error:
-                    st.error(f"❌ Failed to fetch pages: {error}")
-                    st.write("**Troubleshooting tips:**")
-                    st.write("1. Check if your Notion token is correct")
-                    st.write("2. Ensure your integration has access to the pages")
-                    st.write("3. Try refreshing the page")
-                elif pages:
-                    st.success(f"✅ Found {len(pages)} accessible pages")
-                    
-                    # Page selection options
-                    page_selection_mode = st.radio("📄 Page Selection", 
-                                                 ["None", "Select Specific Pages", "All Pages"])
-                    
-                    if page_selection_mode == "Select Specific Pages":
-                        st.write("**Available Pages:**")
-                        selected_page_indices = []
-                        for i, page in enumerate(pages):
-                            page_title = page.get('title', 'Untitled')[:50]
-                            if st.checkbox(f"📄 {page_title}", key=f"page_{i}"):
-                                selected_page_indices.append(i)
-                        
-                        selected_pages = [pages[i] for i in selected_page_indices]
-                        
-                        if selected_pages:
-                            st.info(f"Selected {len(selected_pages)} pages")
-                    
-                    elif page_selection_mode == "All Pages":
-                        selected_pages = pages
-                        st.info(f"📄 All {len(pages)} pages will be loaded")
-                else:
-                    st.warning("⚠️ No accessible pages found. Make sure to share pages with your Notion integration.")
+            st.subheader("📄 Page Selection")
             
-            except Exception as e:
-                st.error(f"❌ Error accessing Notion: {e}")
-                st.write("**Full error details:**")
-                st.code(str(e))
+            # Fetch pages button
+            if st.button("🔍 Fetch Available Pages"):
+                with st.spinner("🔍 Fetching accessible pages..."):
+                    try:
+                        pages, error = get_notion_pages_simple(notion_token)
+                        
+                        if error:
+                            st.error(f"❌ Failed to fetch pages: {error}")
+                            st.write("**Troubleshooting tips:**")
+                            st.write("1. Check if your Notion token is correct")
+                            st.write("2. Ensure your integration has access to the pages")
+                            st.write("3. Try refreshing the page")
+                        elif pages:
+                            st.session_state['notion_pages'] = pages
+                            st.success(f"✅ Found {len(pages)} accessible pages")
+                        else:
+                            st.warning("⚠️ No accessible pages found. Make sure to share pages with your Notion integration.")
+                    
+                    except Exception as e:
+                        st.error(f"❌ Error accessing Notion: {e}")
+                        st.write("**Full error details:**")
+                        st.code(str(e))
+            
+            # Show pages if available
+            if 'notion_pages' in st.session_state and st.session_state['notion_pages']:
+                pages = st.session_state['notion_pages']
+                st.success(f"📄 {len(pages)} pages available for selection")
+                
+                # Page selection options
+                page_selection_mode = st.radio("📄 How to select pages:", 
+                                             ["None", "Select Specific Pages", "All Pages"])
+                
+                if page_selection_mode == "Select Specific Pages":
+                    st.write("**Select pages to load:**")
+                    selected_page_indices = []
+                    
+                    # Show pages with checkboxes
+                    for i, page in enumerate(pages):
+                        page_title = page.get('title', 'Untitled')
+                        page_date = page.get('last_edited_time', '')[:10] if page.get('last_edited_time') else 'Unknown'
+                        
+                        if st.checkbox(f"📄 {page_title} (Last edited: {page_date})", key=f"page_{i}"):
+                            selected_page_indices.append(i)
+                    
+                    selected_pages = [pages[i] for i in selected_page_indices]
+                    
+                    if selected_pages:
+                        st.info(f"✅ Selected {len(selected_pages)} pages")
+                        
+                        # Show selected pages
+                        with st.expander("👀 Selected Pages"):
+                            for page in selected_pages:
+                                st.write(f"• {page['title']}")
+                
+                elif page_selection_mode == "All Pages":
+                    selected_pages = pages
+                    st.info(f"📄 All {len(pages)} pages will be loaded")
+                    
+                    # Show all pages that will be loaded
+                    with st.expander("👀 All Pages to Load"):
+                        for page in pages:
+                            st.write(f"• {page['title']}")
         
         elif not notion_token:
             st.warning("⚠️ Enter Notion token to load content")
